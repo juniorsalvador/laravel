@@ -252,3 +252,165 @@ curl -v -H "Host: api-rl-teste.svc.default" http://<INGRESS_IP>/
    - O Istio fornece métricas nativas sobre requisições aceitas/rejeitadas
 
 Esta solução oferece um rate limiting distribuído robusto, adequado para ambientes de produção em EKS, com a capacidade de escalar horizontalmente mantendo a consistência das contagens através do Redis.
+
+---
+-
+
+---
+
+Sim, existe uma maneira de fazer o deployment sem usar um registry de imagens Docker. Você pode criar o pod diretamente com o código da aplicação usando um `ConfigMap` para armazenar o script Python e montá-lo como um volume no container. Aqui está como fazer:
+
+## Solução sem Registry de Imagens
+
+### 1. ConfigMap com o Código da Aplicação (app-configmap.yaml)
+
+```yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: pod-info-app-code
+data:
+  app.py: |
+    from flask import Flask, request, jsonify
+    import os
+
+    app = Flask(__name__)
+
+    @app.route('/')
+    def hello():
+        pod_name = os.getenv('HOSTNAME', 'unknown')
+        x_sigla = request.headers.get('x-sigla', 'not-provided')
+        
+        response_data = {
+            'pod_name': pod_name,
+            'status_code': 200,
+            'x_sigla': x_sigla
+        }
+        
+        return jsonify(response_data)
+
+    if __name__ == '__main__':
+        app.run(host='0.0.0.0', port=8080)
+```
+
+### 2. Deployment usando Imagem Python Oficial (deployment-direct.yaml)
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pod-info-app
+  labels:
+    app: pod-info
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: pod-info
+  template:
+    metadata:
+      labels:
+        app: pod-info
+    spec:
+      containers:
+      - name: pod-info-container
+        image: python:3.9-slim
+        command: ["python", "/app/app.py"]
+        ports:
+        - containerPort: 8080
+        env:
+        - name: HOSTNAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        volumeMounts:
+        - name: app-code
+          mountPath: /app
+        # Instala as dependências no startup
+        lifecycle:
+          postStart:
+            exec:
+              command: ["sh", "-c", "pip install flask && python -c 'import flask'"]
+      volumes:
+      - name: app-code
+        configMap:
+          name: pod-info-app-code
+```
+
+### 3. Service (service-direct.yaml) - Igual ao anterior
+
+```yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: pod-info-service
+spec:
+  selector:
+    app: pod-info
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 8080
+```
+
+## Como Implantar:
+
+1. Aplique os arquivos YAML:
+```bash
+kubectl apply -f app-configmap.yaml
+kubectl apply -f deployment-direct.yaml
+kubectl apply -f service-direct.yaml
+```
+
+2. Verifique se os pods estão rodando:
+```bash
+kubectl get pods
+```
+
+3. Teste a aplicação:
+```bash
+kubectl run -it --rm test --image=curlimages/curl --restart=Never -- sh
+curl -H "x-sigla: TEST123" pod-info-service
+```
+
+## Vantagens desta Abordagem:
+
+1. **Sem necessidade de registry Docker**
+2. **Fácil atualização do código** - basta atualizar o ConfigMap
+3. **Usa imagem oficial Python** (mais segura que construir sua própria)
+
+## Limitações:
+
+1. **Tempo de startup mais lento** - instala as dependências a cada inicialização
+2. **Não é ideal para produção** - melhor para desenvolvimento/testes
+3. **Código exposto no ConfigMap** - não é o ideal para código proprietário
+
+## Alternativa Avançada (usando InitContainer):
+
+Para melhorar o desempenho, você pode usar um InitContainer para instalar as dependências uma vez:
+
+```yaml
+# Adicione ao template do deployment
+initContainers:
+- name: install-deps
+  image: python:3.9-slim
+  command: ["sh", "-c", "pip install flask && mkdir -p /deps && cp -r /usr/local/lib/python3.9/site-packages /deps"]
+  volumeMounts:
+  - name: python-deps
+    mountPath: /deps
+volumes:
+- name: python-deps
+  emptyDir: {}
+```
+
+E no container principal:
+```yaml
+env:
+- name: PYTHONPATH
+  value: /deps/site-packages
+volumeMounts:
+- name: python-deps
+  mountPath: /deps
+```
+
+Esta solução elimina a necessidade de registry enquanto mantém um tempo de startup rápido!
