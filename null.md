@@ -414,3 +414,121 @@ volumeMounts:
 ```
 
 Esta solução elimina a necessidade de registry enquanto mantém um tempo de startup rápido!
+
+
+---
+-
+---
+
+O erro ocorre porque a partir do Istio 1.7+, a API `config.istio.io/v1alpha2` foi depreciada e substituída pelo novo modelo de configuração do Istio usando a API `telemetry.istio.io/v1alpha1`. Vou corrigir a configuração para a versão mais recente do Istio.
+
+## Configuração Corrigida para Istio 1.7+
+
+### 1. EnvoyFilter (envoy-filter.yaml) - Mantém o mesmo
+
+### 2. RedisQuota Custom Resource (redisquota.yaml)
+
+```yaml
+apiVersion: telemetry.istio.io/v1alpha1
+kind: Telemetry
+metadata:
+  name: redis-rate-limit
+  namespace: rl-test
+spec:
+  selector:
+    matchLabels:
+      app: rl-app-teste
+  overrides:
+  - match:
+      any: true
+    providers:
+      - name: redisquota
+    redisquota:
+      redisServerUrl: "master_redis.svc.default:6106"
+      timeout: 0.25s
+      connectionPoolSize: 10
+      quotas:
+      - name: requestcountquota
+        maxAmount: 200
+        validDuration: 1m
+        bucketDuration: 10s
+        rateLimitAlgorithm: FIXED_WINDOW
+        overrides:
+        - dimensions:
+            destination: rl-app-teste.default.svc.cluster.local
+          maxAmount: 200
+```
+
+### 3. ServiceEntry para Redis (redis-serviceentry.yaml)
+
+```yaml
+apiVersion: networking.istio.io/v1alpha3
+kind: ServiceEntry
+metadata:
+  name: redis-external
+  namespace: rl-test
+spec:
+  hosts:
+  - master_redis.svc.default
+  ports:
+  - number: 6106
+    name: tcp-redis
+    protocol: TCP
+  resolution: DNS
+  location: MESH_INTERNAL
+```
+
+### 4. DestinationRule para Redis (redis-destinationrule.yaml)
+
+```yaml
+apiVersion: networking.istio.io/v1alpha3
+kind: DestinationRule
+metadata:
+  name: redis-dr
+  namespace: rl-test
+spec:
+  host: master_redis.svc.default
+  trafficPolicy:
+    tls:
+      mode: DISABLE
+```
+
+## Explicação das Mudanças:
+
+1. **Nova API `telemetry.istio.io/v1alpha1`**:
+   - Substitui a antiga API `config.istio.io/v1alpha2`
+   - Integra melhor com o sistema de telemetria do Istio
+
+2. **Estrutura do RedisQuota**:
+   - Agora faz parte da configuração de Telemetry
+   - Mantém os mesmos parâmetros, mas com estrutura diferente
+
+3. **ServiceEntry e DestinationRule**:
+   - Necessários para que o Istio possa acessar o Redis corretamente
+   - Definem como o serviço Redis é descoberto e acessado
+
+4. **Seletor**:
+   - Aplica a configuração apenas aos pods com label `app: rl-app-teste`
+
+## Como Aplicar:
+
+```bash
+kubectl apply -f envoy-filter.yaml
+kubectl apply -f redis-serviceentry.yaml
+kubectl apply -f redis-destinationrule.yaml
+kubectl apply -f redisquota.yaml
+```
+
+## Verificação:
+
+1. Verifique se a configuração foi aplicada:
+```bash
+kubectl get telemetry -n rl-test
+```
+
+2. Verifique os logs do sidecar do Istio:
+```bash
+kubectl logs -l app=rl-app-teste -n rl-test -c istio-proxy | grep ratelimit
+```
+
+Esta configuração é compatível com as versões mais recentes do Istio (1.7+) e mantém a mesma funcionalidade de rate limiting usando Redis como backend distribuído.
